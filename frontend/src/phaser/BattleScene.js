@@ -12,6 +12,7 @@ const GROUND_Y = 330
 const POS = {
   player: { x: 200, y: GROUND_Y },
   enemy: { x: 760, y: GROUND_Y },
+  companion: { x: 138, y: GROUND_Y + 78 },
 }
 const BODY_COLOR = { player: 0x3a7bd5, enemy: 0xe04850 }
 const BAR_W = 150
@@ -97,6 +98,31 @@ function drawBody(scene, ent, gray) {
   }
 }
 
+// 随行伙伴：玩家身后的小圆精灵 + 图标 + 名字/血量；协助时冲出去攻击敌人
+function buildCompanion(scene) {
+  const container = scene.add.container(POS.companion.x, POS.companion.y).setDepth(2)
+  const body = scene.add.graphics()
+  const icon = scene.add.text(0, -2, '🐾', { font: '20px sans-serif' }).setOrigin(0.5)
+  const label = scene.add.text(0, 20, '', { font: '600 12px sans-serif', fill: '#cfe' }).setOrigin(0.5)
+  const hpText = scene.add.text(0, 34, '', { font: '11px sans-serif', fill: '#9fe6b0' }).setOrigin(0.5)
+  container.add([body, icon, label, hpText])
+  const ent = { container, body, icon, label, hpText, radius: 16, visible: false, down: false }
+  drawCompanion(ent, true)
+  container.setAlpha(0)
+  return ent
+}
+
+function drawCompanion(ent, healthy) {
+  const { body, radius: r } = ent
+  body.clear()
+  body.fillStyle(0x000000, 0.3)
+  body.fillEllipse(0, r + 8, r * 1.8, 9)
+  body.fillStyle(healthy ? 0x2f7d5b : 0x55525c, 1)
+  body.fillCircle(0, 0, r)
+  body.lineStyle(2, 0x000000, 0.3)
+  body.strokeCircle(0, 0, r)
+}
+
 function buildEntity(scene, key) {
   const radius = key === 'player' ? 40 : 44
   const container = scene.add.container(POS[key].x, POS[key].y).setDepth(2)
@@ -134,6 +160,9 @@ export default class BattleScene extends Phaser.Scene {
       enemy: buildEntity(this, 'enemy'),
     }
     this.display = { player: null, enemy: null }
+    // 随行伙伴：独立的小型精灵（不参与玩家/敌人血条），协助时前冲攻击
+    this.companion = buildCompanion(this)
+    this._applyCompanion(null)
 
     this.turnText = this.add.text(16, 12, '', { font: '13px sans-serif', fill: '#889' }).setDepth(10)
     this.bannerText = this.add.text(W / 2, 92, '', {
@@ -196,6 +225,25 @@ export default class BattleScene extends Phaser.Scene {
       this.renderEntity(key)
     }
     if (typeof s.turn === 'number') this.turnText.setText(`回合 ${s.turn}`)
+    this._applyCompanion(s.companion)
+  }
+
+  _applyCompanion(c) {
+    const ent = this.companion
+    if (!ent) return
+    if (!c) {
+      ent.visible = false
+      ent.container.setAlpha(0)
+      return
+    }
+    ent.visible = true
+    ent.down = !(c.participating !== false && (c.hp ?? 0) > 0)
+    ent.container.setAlpha(ent.down ? 0.45 : 1)
+    ent.icon.setText(c.icon || '🐾')
+    ent.label.setText(c.name || '伙伴')
+    ent.hpText.setText(`♥ ${c.hp ?? 0}/${c.max_hp ?? 0}`)
+    ent.hpText.setColor(ent.down ? '#ff9f9f' : '#9fe6b0')
+    drawCompanion(ent, !ent.down)
   }
 
   setAlivePose(key) {
@@ -317,6 +365,9 @@ export default class BattleScene extends Phaser.Scene {
       case 'echo_damage':
         await this.onDamage(ev)
         break
+      case 'companion_wound':
+        await this.onCompanionWound(ev)
+        break
       case 'gain_block':
         await this.onBlock(ev)
         break
@@ -343,10 +394,67 @@ export default class BattleScene extends Phaser.Scene {
     }
   }
 
+  // ---------- 伙伴动画 ----------
+  async onCompanionAssist(ev, tgt) {
+    const ent = this.companion
+    const home = POS.companion.x
+    const dir = Math.sign(tgt.container.x - home) || 1
+    const reach = Math.max(80, Math.abs(tgt.container.x - home) - tgt.radius - 60)
+    const cname = ev.extra?.companion_name || '伙伴'
+    this.floatText(home, POS.companion.y - 46, `${cname} 协助！`, '#7be0c9')
+    await new Promise((resolve) => {
+      this.tweens.add({
+        targets: ent.container,
+        x: home + dir * reach, y: POS.companion.y - 26,
+        duration: 170, ease: 'Quad.easeOut',
+        onComplete: () => {
+          this.impact(tgt)
+          this.applyDamage('enemy', ev.value || 0)
+          this.tweens.add({
+            targets: ent.container, x: home, y: POS.companion.y,
+            duration: 230, ease: 'Quad.easeIn', onComplete: resolve,
+          })
+        },
+      })
+    })
+  }
+
+  async onCompanionWound(ev) {
+    const ent = this.companion
+    if (!ent) return
+    const hp = ev.extra?.hp ?? 0
+    const maxHp = ev.extra?.max_hp ?? 0
+    ent.hpText.setText(`♥ ${hp}/${maxHp}`)
+    if (hp <= 0) {
+      ent.down = true
+      drawCompanion(ent, false)
+      ent.container.setAlpha(0.45)
+      this.cameras.main.shake(90, 0.0025)
+      await this.banner(`🐾 ${ev.extra?.companion_name || '伙伴'} 被击倒，暂停参战`, '#ff9f43', 620)
+      this.floatText(POS.companion.x, POS.companion.y - 40, '负伤！需休息治疗', '#ff9f9f')
+    } else {
+      this.floatOnEnt(ent, '负伤 -1', '#ff9f9f')
+      this.cameras.main.shake(50, 0.0018)
+      await this.pause(220)
+    }
+  }
+
+  floatOnEnt(ent, text, css) {
+    this.floatText(ent.container.x, ent.container.y - 40, text, css)
+  }
+
   // ---------- 各效果动画 ----------
   async onDamage(ev) {
     const tKey = targetKeyOf(ev)
     const tgt = this.entities[tKey]
+    // 伙伴协助攻击：由伙伴精灵冲向敌人（玩家不做攻击动作）
+    if (ev.source === 'companion' && tKey === 'enemy' && this.companion?.visible) {
+      await this.onCompanionAssist(ev, tgt)
+      const d = this.display[tKey]
+      if (d && d.hp <= 0) await this.die(tgt)
+      else await this.pause(120)
+      return
+    }
     const src = this.entities[ev.source]
     const impact = () => {
       this.impact(tgt)

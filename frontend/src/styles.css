@@ -415,3 +415,42 @@ button.mini { font-size: 12px; padding: 4px 8px; }
 .replace-warn { color: #ffb37b; font-style: normal; display: block; font-size: 11px; }
 .shopitem.potion { border-left-color: #48bfe3; }
 .battle .potion-belt { margin: 8px auto 0; max-width: 880px; }
+
+/* ---------- 伙伴模块 ---------- */
+.companions-roster h3 { color: #8fe6c4; }
+.companion-card {
+  border: 1px solid #2c2c44; border-left: 3px solid #4bbf95;
+  background: #161f24; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.companion-card.rest { border-left-color: #6b7280; }
+.companion-card.wounded { border-left-color: #ff9f43; background: #2a2118; }
+.cp-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+.cp-mode { font-size: 11px; font-style: normal; padding: 1px 8px; border-radius: 10px; background: #333452; color: #cde; }
+.cp-mode.accompany { background: #1d3a2f; color: #7be0c9; }
+.cp-mode.rest { background: #2c2c3a; color: #99a; }
+.companion-card.wounded .cp-mode { background: #443019; color: #ffc07a; }
+.cp-title { font-size: 11px; color: #8890a8; }
+.cp-hp { font-size: 12px; color: #9fe6b0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cp-hearts i { font-style: normal; margin-right: 1px; }
+.cp-hearts i.full { color: #ff6b81; }
+.cp-hearts i.empty { color: #444; }
+.cp-desc { font-size: 11px; color: #99a; line-height: 1.4; }
+.cp-actions { display: flex; gap: 6px; margin-top: 2px; }
+.cp-actions button { flex: 1; font-size: 12px; padding: 5px 8px; }
+.cp-heal-ready { font-style: normal; color: #7be0c9; font-size: 11px; }
+.shopitem.companion { border-left-color: #4bbf95; }
+
+/* 战斗中的随行伙伴状态条 */
+.battle-companion {
+  display: inline-flex; align-items: center; gap: 8px; align-self: center;
+  background: #16241f; border: 1px solid #2c4a3f; border-radius: 999px;
+  padding: 4px 14px; font-size: 13px; color: #cfeee2; max-width: 880px; margin: 0 auto;
+}
+.battle-companion.down { background: #241f16; border-color: #4a3a24; color: #c9b699; }
+.battle-companion .bc-hp { color: #9fe6b0; font-size: 12px; }
+.battle-companion.down .bc-hp { color: #ff9f9f; }
+.battle-companion .bc-down { font-style: normal; font-size: 11px; color: #ffc07a; }
+.replay-bc { padding: 2px 10px; }
+.replay-companions { max-width: 340px; margin: 8px auto; width: 100%; }
+.replay-companions .companion-card { font-size: 12px; }

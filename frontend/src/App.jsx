@@ -8,6 +8,7 @@ import ForgeView from './components/ForgeView.jsx'
 import ShopView from './components/ShopView.jsx'
 import DeckView from './components/DeckView.jsx'
 import CommissionPanel from './components/CommissionPanel.jsx'
+import CompanionPanel from './components/CompanionPanel.jsx'
 import PotionBelt from './components/PotionBelt.jsx'
 import ReplayPlayer from './components/ReplayPlayer.jsx'
 import ExpeditionReplay from './components/ExpeditionReplay.jsx'
@@ -290,6 +291,7 @@ export default function App() {
         <div className="leftcol">
           <DeckView />
           {!view.in_battle && <PotionBelt />}
+          <CompanionPanel />
           <CommissionPanel />
           {view.unlocked_cards && <Unlocks unlocked={view.unlocked_cards} />}
         </div>

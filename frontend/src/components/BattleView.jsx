@@ -96,6 +96,7 @@ export default function BattleView({ view }) {
   const hand = b?.hand || []
   const energy = b?.energy ?? view.energy
   const inTurn = b?.in_turn
+  const companion = b?.companion
 
   // 手牌项兼容旧档裸 id；新档为 {uid,id,cost,growth/growth_nodes}（费用已含成长换算）
   const handCard = (item) => {
@@ -116,6 +117,13 @@ export default function BattleView({ view }) {
   return (
     <div className="battle">
       <div ref={mountRef} className="phaser" />
+      {companion && (
+        <div className={`battle-companion ${companion.participating ? '' : 'down'}`}>
+          {companion.icon} {companion.name}
+          <span className="bc-hp">♥ {companion.hp}/{companion.max_hp}</span>
+          {!companion.participating && <em className="bc-down">负伤休整中</em>}
+        </div>
+      )}
       <PotionBelt inBattle busy={busy} onUse={usePotion} />
       <div className="handbar">
         <div className="energy">能量 {energy} / {b?.max_energy ?? view.energy}</div>
@@ -168,6 +176,12 @@ export default function BattleView({ view }) {
 function fmtEvent(ev) {
   if (!ev || typeof ev !== 'object') return ''
   if (ev.potion) return `🧪 使用${ev.potion.icon || ''}「${ev.potion.name}」`
+  if (ev.action === 'companion_wound') {
+    const hp = ev.extra?.hp ?? 0
+    return hp > 0
+      ? `🐾 伙伴负伤（剩余生命 ${hp}/${ev.extra?.max_hp}）`
+      : '🐾 伙伴被击倒，暂停参战（可在休息节点治疗）'
+  }
   if (ev.result) {
     if (ev.result === 'lost') return '💀 战败…'
     if (ev.result === 'run_won') return '🏆 通关！'

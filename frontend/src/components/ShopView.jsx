@@ -64,6 +64,10 @@ export default function ShopView({ view, onClose }) {
     return transact({ action: 'commission_accept', sku })
   }
 
+  function buyCompanion(sku) {
+    return transact({ action: 'shop_buy', kind: 'companion', sku })
+  }
+
   // 交易记录里把 sku 解析成中文名称
   const itemName = (kind, sku) => {
     const bucket = kind === 'card' ? shop.cards : shop.relics
@@ -145,6 +149,33 @@ export default function ShopView({ view, onClose }) {
           ))}
         </div>
 
+        <h3 className="shopsection">伙伴（招募后可随行/休整）</h3>
+        <p className="shopdesc">
+          随行伙伴每个自己的回合开始按特性协助战斗；受到敌人重创会负伤（暂停参战），
+          可在休息节点治疗。同一时间仅一名随行，伙伴状态跨章继承。
+        </p>
+        <div className="shoplist">
+          {(shop.companions || []).length === 0 && (
+            <span className="shopempty">伙伴已全部招募。</span>
+          )}
+          {(shop.companions || []).map((it) => (
+            <button
+              key={it.sku}
+              className={`shopitem companion ${it.sold ? 'sold' : ''}`}
+              onClick={() => !it.sold && buyCompanion(it.sku)}
+              disabled={it.sold || busy || view.gold < it.price}
+              title={it.desc}
+            >
+              <span className="siname">
+                {it.icon} {it.name}
+                <em className="sitype">{it.title} · 生命 {it.hp}</em>
+              </span>
+              <span className="sidesc">{it.desc}</span>
+              <span className="siprice">{it.sold ? '已招募' : `${it.price} 金币`}</span>
+            </button>
+          ))}
+        </div>
+
         <h3 className="shopsection">远征委托</h3>
         {(!view.expedition || (shop.commissions || []).length === 0) && (
           <p className="shopdesc">
@@ -213,7 +244,9 @@ export default function ShopView({ view, onClose }) {
               {shop.tx.map((t, i) => (
                 <li key={i}>
                   {t.type === 'buy'
-                    ? `购入${t.kind === 'card' ? '卡牌' : '遗物'}「${itemName(t.kind, t.sku)}」，花费 ${t.price}`
+                    ? t.kind === 'companion'
+                      ? `招募伙伴（${t.companion}），花费 ${t.price}`
+                      : `购入${t.kind === 'card' ? '卡牌' : '遗物'}「${itemName(t.kind, t.sku)}」，花费 ${t.price}`
                     : `移除卡牌实例（${cardMeta(t.card)?.name || t.card}），花费 ${t.price}，牌组 ${t.deck_size} 张`}
                   ｜余额 {t.gold_left}
                 </li>

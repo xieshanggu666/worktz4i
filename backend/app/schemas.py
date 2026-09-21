@@ -24,11 +24,13 @@ class ActRequest(BaseModel):
     option: Optional[int] = None
     growth_node: Optional[str] = None  # forge 动作用：成长树节点 id（2.3.0+）
     branch: Optional[str] = None  # forge 旧字段（兼容旧客户端/日志：等同 growth_node）
-    kind: Optional[str] = None    # shop_buy 动作用：货架类别 card/relic/potion
+    kind: Optional[str] = None    # shop_buy 动作用：货架类别 card/relic/potion/companion
     sku: Optional[str] = None     # shop_buy/commission_accept 动作用：货架项/委托挂单项 id
     commission: Optional[str] = None  # commission_claim 动作用：委托实例 id
     slot: Optional[int] = None    # use_potion/discard_potion 动作用：药水背包格位（0 基）
     replace: Optional[int] = None  # 背满购买/领取药水时：被替换丢弃的格位（0 基）
+    companion: Optional[str] = None  # companion_set_mode/companion_heal：伙伴 id
+    mode: Optional[str] = None    # companion_set_mode：accompany（随行）/ rest（休整）
     # 并发控制（可选，老客户端不带也完全兼容）：
     request_id: Optional[str] = None   # 客户端生成的请求令牌：同令牌重复提交返回首次结果
     expected_rev: Optional[int] = None  # 所依据视口的存档版本；过期提交 -> 409

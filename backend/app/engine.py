@@ -26,7 +26,7 @@ class Battle:
     """单场战斗：玩家 vs 一个敌人/首领。resolve 消费结算队列，产出事件日志。"""
 
     def __init__(self, run_state, enemy_def, seed, battle_index, relic_status="", relic_power=0, boss_hp_bonus=0,
-                 card_instances=None):
+                 card_instances=None, companion=None):
         max_hp = run_state["max_health"]
         self.entities = {
             "player": make_entity("player", run_state.get("player_name", "勇者"), max_hp, run_state["health"]),
@@ -65,10 +65,16 @@ class Battle:
         self.card_instances = dict(card_instances or {})
         self.energy = run_state.get("base_energy", 3)
         self.max_energy = run_state.get("base_energy", 3)
+        # 随行且未负伤的伙伴：战斗内同步其 hp/max_hp（协助见 start_turn，
+        # 负伤见 resolve 的重创标记）；None 表示本场无随行伙伴
+        self.companion = dict(companion) if companion else None
         self.in_turn = False
         self.turn = 0
         self.truncated = False
         self.queue = SettlementQueue(self)
+        # 建场开局回合（start_turn）产生的伙伴协助日志：在线建场时供调用方补入
+        # 建场动作日志（回放需要），from_state 恢复的旧战斗没有此字段
+        self.initial_turn_log = []
 
     # ---------- 卡牌实例 ----------
     def _card_def(self, ref):
@@ -106,9 +112,20 @@ class Battle:
         if a == "damage" or a == "echo_damage":
             if target is None or not target["alive"]:
                 return children
+            # 重创：敌人带 wound 标记的攻击突破格挡削到玩家生命时，随行伙伴负伤。
+            # 在 _hurt 前后比对生命，仅在确实穿透到生命时结算（格挡全吸收不算）。
+            wound = bool(ev.extra.get("wound")) and ev.target == "player" and self.companion
+            hp_before = target["hp"] if wound else 0
             dmg = _final_damage(self, ev)
             _hurt(target, dmg)
             ev.value = dmg  # 日志记录实际结算伤害
+            if wound and self.companion and target["hp"] < hp_before:
+                self.companion["hp"] = max(0, self.companion["hp"] - 1)
+                children.append(EffectEvent(
+                    "companion_wound", target="player",
+                    value=1, source="enemy", tags=["system"],
+                    extra={"companion": self.companion["id"],
+                           "hp": self.companion["hp"], "max_hp": self.companion["max_hp"]}))
             # 连锁：攻击者的回响 -> 再攻击
             if "attack" in ev.tags:
                 src = self.entities.get(ev.source)
@@ -147,6 +164,9 @@ class Battle:
                 target["hp"] = min(target["max_hp"], target["hp"] + ev.value)
         elif a == "gain_energy":
             self.energy += ev.value
+        elif a == "companion_wound":
+            # 伙伴负伤结算已在父「重创」伤害事件里完成（hp 扣减）；本事件仅供日志/演出
+            pass
         return children
 
     # ---------- 死亡结算与连锁中断 ----------
@@ -165,6 +185,11 @@ class Battle:
 
     # ---------- 回合流程 ----------
     def start_turn(self):
+        """进入玩家回合。返回 (snapshot, 本回合开始的结算日志)。
+
+        日志含随行伙伴的协助事件（每个自己的回合开始按伙伴特性攻击/格挡，
+        走同一结算队列，含易伤加成与收尾击杀）；无伙伴时为空列表。
+        """
         self.turn += 1
         self.in_turn = True
         self.energy = self.max_energy
@@ -174,6 +199,11 @@ class Battle:
         spt = p["statuses"].get("strength_per_turn")
         if spt:
             _apply_status(p, "strength", spt["value"], "add")
+        # 随行伙伴协助（负伤归零的伙伴立即停止本回合及后续协助）
+        turn_log = self._companion_assist()
+        if self.turn == 1:
+            # 建场开局协助日志：建场动作据此补入日志（回放逐位重演）
+            self.initial_turn_log = turn_log
         # 抽牌 & 韧性递减
         have_draw = 0
         for _ in range(5):
@@ -186,7 +216,38 @@ class Battle:
             self.hand.append(self.draw_pile.pop(0)); have_draw += 1
         for ent in self.entities.values():
             _tick_statuses(ent)
-        return self.to_snapshot()
+        return self.to_snapshot(), turn_log
+
+    def _companion_assist(self):
+        """随行伙伴的回合开始协助：把伙伴特性效果压入结算队列并返回日志。
+
+        负伤（hp 归零）的伙伴不再出手；协助击杀敌人后，其后续协助效果（如
+        侍从的格挡）仍会结算——定向到死亡敌人的伤害由队列的死亡打断剔除。
+        """
+        c = self.companion
+        if not c or c.get("hp", 0) <= 0:
+            return []
+        from .companions import COMPANIONS
+        defn = COMPANIONS.get(c["id"])
+        if defn is None:
+            return []
+        q = SettlementQueue(self)
+        for eff in defn["assist"]:
+            t = eff["type"]
+            if t in ("apply_status", "set_status", "gain_block", "heal", "draw", "gain_energy"):
+                target = eff.get("target", "player")
+            else:
+                target = eff.get("target", "enemy")
+            q.push(EffectEvent(
+                t, target=target, value=eff.get("value", 0),
+                source="companion", tags=eff.get("tags", []),
+                extra={"status": eff.get("status"), "ticks": eff.get("ticks"),
+                       "stack": eff.get("stack"),
+                       "companion": c["id"], "companion_name": defn["name"],
+                       "companion_icon": defn.get("icon", "🐾")}))
+        log = q.run()
+        self.truncated = self.truncated or q.truncated
+        return log
 
     def end_turn(self):
         """敌方行动并推进回合。返回 (敌方结算日志, 意图)，日志按结算顺序供前端播放。"""
@@ -204,12 +265,14 @@ class Battle:
                 q.push(EffectEvent(t, target=target, value=eff.get("value", 0),
                                    source="enemy", tags=eff.get("tags", []),
                                    extra={"status": eff.get("status"), "ticks": eff.get("ticks"),
-                                          "stack": eff.get("stack")}))
+                                          "stack": eff.get("stack"),
+                                          "wound": eff.get("wound", False)}))
             logs = self._run_sub(q, intent)
         self.collect_deaths(self.queue)
-        # 战斗未结束则进入玩家下一回合（重新获得能量并抽牌）
+        # 战斗未结束则进入玩家下一回合（重新获得能量、伙伴协助并抽牌）
         if self.battle_result() == "ongoing":
-            self.start_turn()
+            _snap, turn_log = self.start_turn()
+            logs = logs + turn_log
         return logs, intent
 
     def _enemy_intent(self):
@@ -287,6 +350,7 @@ class Battle:
             "energy": self.energy, "max_energy": self.max_energy,
             "turn": self.turn, "in_turn": self.in_turn, "phase": self.phase,
             "truncated": self.truncated,
+            "companion": dict(self.companion) if self.companion else None,
         }
 
     @classmethod
@@ -313,6 +377,8 @@ class Battle:
         b.in_turn = bstate.get("in_turn", False)
         b.phase = bstate.get("phase", 0)
         b.truncated = bstate.get("truncated", False)
+        b.companion = dict(bstate["companion"]) if bstate.get("companion") else None
+        b.initial_turn_log = []
         b.queue = SettlementQueue(b)
         return b
 
@@ -330,6 +396,21 @@ class Battle:
             "energy": self.energy, "max_energy": self.max_energy,
             "turn": self.turn, "in_turn": self.in_turn, "truncated": self.truncated,
             "hand": list(self.hand),
+            "companion": self._companion_snapshot(),
+        }
+
+    def _companion_snapshot(self):
+        """战斗中伙伴的展示态（仅随行伙伴；负伤 hp=0 时标 participating=false）。"""
+        c = self.companion
+        if not c:
+            return None
+        from .companions import COMPANIONS
+        defn = COMPANIONS.get(c["id"], {})
+        return {
+            "id": c["id"], "name": defn.get("name", c["id"]),
+            "icon": defn.get("icon", "🐾"),
+            "hp": c.get("hp", 0), "max_hp": c.get("max_hp", defn.get("hp", 0)),
+            "participating": c.get("hp", 0) > 0,
         }
 
     def battle_result(self):

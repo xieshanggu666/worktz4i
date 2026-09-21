@@ -16,6 +16,15 @@
   消耗与战斗效果（伤害/格挡/治疗/状态/能量，含死亡打断与胜负）在**同一个动作里原子结算**——成功才随
   事务落库，双击/超时重试走 request_id 幂等只生效一瓶；药水随交接快照跨章携带，续局、领奖、战败解锁与
   整程回放全部逐位一致（规则 2.5.0，旧档首次载入补空背包）
+- **伙伴模块**：旅途商店挂出未招募的伙伴货架（忍猫/侍从/学徒法师，确定性生成、同型不重复挂出），
+  花金币招募——扣款与售罄走统一商店事务（重复招募 409、金币不足 400 零副作用、成功交易推进贸易委托），
+  request_id 幂等保证双击只招一名。招募后可在非战斗时选择**随行**或**休整**（同一时间仅一名随行，
+  切随行自动换下原随行，负伤伙伴须先治疗）；随行伙伴进入战斗，每个自己的回合开始按特性协助
+  （攻击/格挡，复用结算队列——易伤加成、死亡打断、收尾击杀与胜负同动作结算）。敌人带「重创」标记的
+  攻击（如邪狼撕咬/黑铁兵挥砍/首领尾锤）突破格挡削到玩家生命时，随行伙伴 hp-1；归零即**负伤暂停参战**，
+  可在**休息节点**治疗（每节点一次，回满并恢复随行）。伙伴名册 `companions`（id/hp/max_hp/mode，
+  含伤势）保存在 run 状态并随交接快照**跨章继承**（章间接休整不治疗伙伴），招募扣款/战斗协助/负伤/
+  治疗全部是动作序列的确定性函数——续局、整局回放逐位校验（规则 2.6.0），旧档首次载入补空名册
 - 构筑牌组、挑战精英/首领，奖励选择影响后续遭遇（遗物加伤、首领血量提升等）
 - 卡牌效果统一经 **结算队列** 处理，支持连锁触发、状态叠加、死亡打断
 - **战斗演出**：Phaser 场景按服务端结算顺序逐条播放（待机/攻击/受击/死亡动画、护盾与状态实时刷新），
@@ -92,12 +101,18 @@ request_id 幂等含并发同键、expected_rev 状态冲突 409、旧 schema �
 替换丢弃/贸易委托推进/失败零副作用、战利品药水入包与背满选格替换、五种药水战斗效果、
 消耗与击杀胜负同动作原子结算、非回合/战斗外/战败终态拒绝使用且不消耗、非战斗丢弃与
 战斗中禁丢、request_id 双击只生效一瓶、药水随交接快照跨章、购买/使用/替换逐位回放
-校验点全通过且最终帧与在线一致、旧档空背包迁移）**。
+校验点全通过且最终帧与在线一致、旧档空背包迁移）**、
+**伙伴模块（货架确定性/已招募去重、招募扣款售罄/金币不足零副作用/同型重复 409/
+request_id 幂等只招一名/成功交易推进贸易委托、首次默认随行其后休整、随行切换自动换下/
+战斗中拒绝/负伤不能随行/同模式 409、三种伙伴每回合协助伤害与格挡、协助走结算队列、
+重创穿透格挡负伤而全格挡与非重创不负伤、归零暂停参战且续局保留伤势、休息节点治疗一次
+回满恢复随行/满血与非休息拒绝、伙伴带伤跨章继承、合法招募-切换-协助流程逐位回放校验
+通过且最终帧一致、2.6.0 规则版本、旧档空名册迁移）**。
 
 ## API 摘要
 - `POST /api/runs {seed?}` 建局
 - `GET  /api/runs/{id}/resume` 续局
-- `POST /api/runs/{id}/act {action,...}` 行动（choose_node / play / end_turn / claim_reward / forge / shop_buy / shop_remove / use_potion / discard_potion / commission_accept / commission_claim）
+- `POST /api/runs/{id}/act {action,...}` 行动（choose_node / play / end_turn / claim_reward / forge / shop_buy / shop_remove / use_potion / discard_potion / commission_accept / commission_claim / companion_set_mode / companion_heal）
   - 可选并发字段：`request_id`（客户端为每个意图生成的令牌；同令牌重复/并发提交返回首次响应，
     响应里 `duplicate:true`，绝不重复执行）、`expected_rev`（所依据视口的存档版本号；
     存档已被推进则返回 409 状态冲突）。行动响应与 `/resume` 视口携带当前 `rev`。
@@ -132,8 +147,10 @@ request_id 幂等含并发同键、expected_rev 状态冲突 409、旧 schema �
 每笔固定 25 金）兼容重演；旧版存档的 `forges:[分支...]` 在首次载入时自动迁移。
 
 商店行动（进入商店节点后视口携带 `shop_available:true` 与 `shop` 库存）：
-- 购买：`{action:"shop_buy", kind:"card"|"relic", sku:<货架项 id，如 "card:cleave">}`，
+- 购买：`{action:"shop_buy", kind:"card"|"relic"|"potion"|"companion", sku:<货架项 id，如 "card:cleave">}`，
   按货架价格扣款；重复购买/已持有遗物返回 409（售罄，不扣款），金币不足/非法货架返回 400。
+  `kind:"companion"` 招募伙伴（货架项 `companion:<id>`，如 `companion:kunoichi`）：首次招募且
+  当前无随行伙伴时默认随行，否则默认休整；同型重复招募 409（不扣款）。
 - 移除：`{action:"shop_remove", card:<卡牌实例 uid>}`，永久删除该实例（同名卡其余副本不受影响），
   基础价 35 金币，同店每移除一次下一次 +15（`shop.remove.cost`/`next_cost` 随视口返回）；
   牌组仅剩 1 张、金币不足或 uid 非法返回 400。
@@ -159,6 +176,36 @@ request_id 幂等含并发同键、expected_rev 状态冲突 409、旧 schema �
 - 回放：`use_potion/discard_potion` 是普通动作（kind=battle/potion），消耗与效果
   逐位重建、校验点严格比对；`log[0]` 为 `{potion:{slot,id,name,icon}}` 消耗标记，
   其后是同序结算事件，前端 Phaser 先弹药水横幅再逐条播放。
+
+伙伴模块（`app/companions.py`，规则 2.6.0）：
+- 名册：run 状态 `companions` 为 `[{id,hp,max_hp,mode}]`（mode=`accompany`/`rest`），
+  随章节交接快照 `carry.companions` 带入下一章——**负伤状态跨章保留**（章间接休整只回
+  玩家 25% 生命，不治疗伙伴）；旧档缺字段首次载入补空名册（结构迁移，本步按 legacy 处理）。
+- 招募：商店伙伴货架（`shop.companions[]`，`COMPANIONS` 确定性生成、已招募同型不再挂出，
+  各自独立 sold），`shop_buy {kind:"companion", sku}` 走统一商店事务（扣款/售罄/失败零回退），
+  成功一笔同时推进贸易委托；双击/超时重试走 request_id 幂等，只招一名、只扣一次款。
+- 随行/休整：`{action:"companion_set_mode", companion:<id>, mode:"accompany"|"rest"}`，
+  仅非战斗可用；同一时间至多一名随行（切随行时原随行自动转休整）；负伤伙伴不能随行（400），
+  重复设置同一模式 409。随行未负伤的伙伴在 `_build_battle` 传入战斗（`Battle.companion`）。
+- 回合协助：随行伙伴在每个自己回合开始（`Battle.start_turn`，含建场首回合与 `end_turn`
+  后的下一回合）按其 `assist` 效果压入同一个结算队列（`source="companion"`）：忍猫每回合
+  3 伤害（攻击标签，可触发敌人回响）、侍从 4 格挡 + 2 伤害、学徒法师 5 术法伤害（1 血）。
+  因此易伤/易碎加成、格挡、死亡打断、收尾击杀与 `run_won` 都在同一动作原子结算；建场首回合
+  的协助事件补入 `choose_node` 动作日志（末附 snapshot 校正点），在线与回放同序播放。
+- 负伤：敌人技能效果带 `wound:true`（重创，如邪狼/黑铁兵/疫蛆/血裔/战团长/首领的重击）时，
+  该次伤害在 `Battle.resolve` 里突破格挡削到玩家生命则伙伴 hp-1，并追加
+  `companion_wound` 事件（hp 归零即负伤）；格挡全吸收或非重创攻击不致伤。hp 归零的伙伴
+  立即停止本回合及后续协助（`companions.active_companion` 过滤），战斗内 hp 每步回写名册，
+  续局保留（battle dump 持久化 companion）。
+- 治疗：`{action:"companion_heal", companion:<id>}` 仅在**休息节点**可用（进入休息节点
+  `rest_companion_heal_available=true`，治疗一次或离开即关闭）；回满 hp 并恢复随行。
+  满血/重复治疗 409，非休息节点/战斗中/未知伙伴 400，零副作用。
+- 视口：`view.companions`（名册，含 wounded/accompanying）、`view.companion_catalog`（可招募目录）、
+  `view.rest_companion_heal_available`（当前休息节点能否治疗）；战斗快照 `view.battle.companion`
+  为随行伙伴展示态（id/name/icon/hp/max_hp/participating）。前端侧栏 `CompanionPanel` 切换随行/
+  休整与休息治疗，商店伙伴货架招募，Phaser 播放伙伴前冲协助动画与负伤横幅。
+- 回放：招募(shop_buy)/companion_set_mode/companion_heal 是普通动作（kind=companion），
+  协助伤害/格挡与负伤事件随战斗日志逐位重建，校验点严格比对；时间轴可按「伙伴」类型过滤。
 
 远征委托（仅远征章节商店挂单，普通局不出委托）：
 - 挂单：进入商店时 `shop.commissions[]` 确定性生成（随商店种子/章号/已持有委托，

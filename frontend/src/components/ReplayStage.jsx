@@ -49,6 +49,13 @@ export default function ReplayStage({ view, showShop }) {
         <div ref={mountRef} className="phaser" />
         <div className="handbar replay-handbar">
           <div className="energy">能量 {b.energy} / {b.max_energy}</div>
+          {b.companion && (
+            <span className={`battle-companion replay-bc ${b.companion.participating ? '' : 'down'}`}>
+              {b.companion.icon} {b.companion.name}
+              <span className="bc-hp">♥ {b.companion.hp}/{b.companion.max_hp}</span>
+              {!b.companion.participating && <em className="bc-down">负伤休整中</em>}
+            </span>
+          )}
           <div className="hand">
             {hand.length === 0 && <span className="hint">手牌为空</span>}
             {hand.map((item) => {
@@ -82,6 +89,7 @@ export default function ReplayStage({ view, showShop }) {
     <div className="replay-stage">
       <ReplayMap view={view} />
       <PotionBeltReadOnly view={view} />
+      <CompanionsSnapshot companions={view.companions} restHeal={view.rest_companion_heal_available} />
       {view.expedition && (view.commissions || []).length > 0 && (
         <CommissionsSnapshot commissions={view.commissions} />
       )}
@@ -157,6 +165,35 @@ function RewardSnapshot({ view }) {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function CompanionsSnapshot({ companions, restHeal }) {
+  if (!companions || companions.length === 0) return null
+  return (
+    <div className="panellist companions-roster replay-companions">
+      <h3>🐾 伙伴（回放）</h3>
+      {companions.map((c) => (
+        <div key={c.id} className={`companion-card ${c.mode} ${c.wounded ? 'wounded' : ''}`}>
+          <div className="cp-head">
+            <b>{c.icon} {c.name}</b>
+            <span className={`cp-mode ${c.mode}`}>
+              {c.wounded ? '🩹 负伤' : c.mode === 'accompany' ? '随行' : '休整'}
+            </span>
+          </div>
+          <div className="cp-title">{c.title}</div>
+          <div className="cp-hp">
+            生命 {c.hp}/{c.max_hp}
+            <span className="cp-hearts">
+              {Array.from({ length: c.max_hp }).map((_, i) => (
+                <i key={i} className={i < c.hp ? 'full' : 'empty'}>♥</i>
+              ))}
+            </span>
+            {c.wounded && restHeal && <em className="cp-heal-ready">本帧可治疗</em>}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -244,6 +281,19 @@ function ShopSnapshot({ view }) {
           ))}
         </div>
 
+        <h3 className="shopsection">伙伴货架</h3>
+        <div className="shoplist">
+          {(shop.companions || []).length === 0 && <span className="shopempty">无货架（或已全部招募）</span>}
+          {(shop.companions || []).map((it) => (
+            <span key={it.sku} className={`shopitem companion readonly ${it.sold ? 'sold' : ''}`}>
+              <span className="siname">{it.icon} {it.name}
+                <em className="sitype">{it.title} · 生命 {it.hp}</em></span>
+              <span className="sidesc">{it.desc}</span>
+              <span className="siprice">{it.sold ? '已招募' : `${it.price} 金币`}</span>
+            </span>
+          ))}
+        </div>
+
         <h3 className="shopsection">远征委托</h3>
         <div className="shoplist">
           {(shop.commissions || []).length === 0 && (
@@ -275,7 +325,9 @@ function ShopSnapshot({ view }) {
               {shop.tx.map((t, i) => (
                 <li key={i}>
                   {t.type === 'buy'
-                    ? `购入${t.kind === 'card' ? '卡牌' : t.kind === 'potion' ? '药水' : '遗物'}「${nameOf(t.kind, t.sku)}」，花费 ${t.price}${t.discarded ? `（替换丢弃）` : ''}`
+                    ? t.kind === 'companion'
+                      ? `招募伙伴（${t.companion}），花费 ${t.price}，余额 ${t.gold_left}`
+                      : `购入${t.kind === 'card' ? '卡牌' : t.kind === 'potion' ? '药水' : '遗物'}「${nameOf(t.kind, t.sku)}」，花费 ${t.price}${t.discarded ? `（替换丢弃）` : ''}`
                     : `移除卡牌实例（${cardMeta(t.card)?.name || t.card}），花费 ${t.price}，牌组 ${t.deck_size} 张`}
                   ｜余额 {t.gold_left}
                 </li>
