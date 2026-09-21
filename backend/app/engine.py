@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import math
 
 from .settlement import EffectEvent, SettlementQueue
+from . import companions as companions_mod
 
 # 状态 id -> 中文名/说明（供前端展示）
 STATUS_INFO = {
@@ -26,7 +28,7 @@ class Battle:
     """单场战斗：玩家 vs 一个敌人/首领。resolve 消费结算队列，产出事件日志。"""
 
     def __init__(self, run_state, enemy_def, seed, battle_index, relic_status="", relic_power=0, boss_hp_bonus=0,
-                 card_instances=None):
+                 card_instances=None, companion_state=None):
         max_hp = run_state["max_health"]
         self.entities = {
             "player": make_entity("player", run_state.get("player_name", "勇者"), max_hp, run_state["health"]),
@@ -39,6 +41,14 @@ class Battle:
         self.enemy_def = enemy_def
         self.enemy = make_entity(enemy_key, enemy_def["name"], enemy_hp, enemy_hp)
         self.entities[enemy_key] = self.enemy
+        self.companion_state = copy.deepcopy(companion_state) if companion_state else None
+        self.companion_def = (
+            companions_mod.COMPANIONS.get(self.companion_state.get("id"), companions_mod.SQUIRE)
+            if self.companion_state else None
+        )
+        companion_ent = companions_mod.snapshot_for_battle(self.companion_state)
+        if companion_ent is not None:
+            self.entities["companion"] = companion_ent
 
         # 由奖励选择带入的常驻效果（relic）幻化成战斗初始状态
         st = self.entities["player"]["statuses"]
@@ -97,6 +107,48 @@ class Battle:
         p = self.entities["player"]
         return 0
 
+    # ---------- 伙伴 ----------
+    def companion_assists(self):
+        """随行且未负伤的伙伴在回合开始时攻击敌人。"""
+        companion = self.entities.get("companion")
+        if companion is None or not companion["alive"] or self.is_dead("enemy"):
+            return []
+        q = SettlementQueue(self)
+        q.push(EffectEvent("damage", target="enemy",
+                           value=self.companion_def["attack"],
+                           source="companion", tags=["attack", "companion"]))
+        log = q.run()
+        self.truncated = self.truncated or q.truncated
+        return log
+
+    def before_resolve(self, ev):
+        """伙伴援护在玩家受击前先入队；标记后当前伤害再按减免值结算。"""
+        if ev.action not in ("damage", "echo_damage") or ev.extra.get("guard_prepared"):
+            return []
+        target = self.entities.get(ev.target)
+        if (ev.source != "enemy" or target is not self.entities.get("player")
+                or "attack" not in ev.tags):
+            ev.extra["guard_prepared"] = True
+            return []
+        companion = self.entities.get("companion")
+        player = self.entities.get("player")
+        if companion is None or not companion["alive"]:
+            ev.extra["guard_prepared"] = True
+            return []
+        dmg = _final_damage(self, ev)
+        ev.extra["guard_prepared"] = True
+        if dmg <= player["block"]:
+            return []
+        absorbed = min(self.companion_def["guard"], companion["hp"], dmg)
+        if absorbed <= 0:
+            return []
+        ev.value = max(0, dmg - absorbed)
+        ev.extra["final_damage"] = ev.value
+        return [EffectEvent(
+            "damage", target="companion", value=absorbed,
+            source="enemy", tags=["attack", "companion_guard"],
+        )]
+
     # ---------- 效果解析（返回子事件 = 连锁） ----------
     def resolve(self, ev: EffectEvent) -> list:
         children = []
@@ -107,6 +159,8 @@ class Battle:
             if target is None or not target["alive"]:
                 return children
             dmg = _final_damage(self, ev)
+            if "final_damage" in ev.extra:
+                dmg = ev.extra["final_damage"]
             _hurt(target, dmg)
             ev.value = dmg  # 日志记录实际结算伤害
             # 连锁：攻击者的回响 -> 再攻击
@@ -168,6 +222,14 @@ class Battle:
         self.turn += 1
         self.in_turn = True
         self.energy = self.max_energy
+        logs = []
+        companion_log = self.companion_assists()
+        if companion_log:
+            logs.append({"companion_turn": {
+                "name": self.entities["companion"]["name"],
+                "attack": self.companion_def["attack"],
+            }})
+            logs.extend(companion_log)
         p = self.entities["player"]
         p["block"] = 0  # 玩家格挡回合末清空（简化）
         # 回合开始触发：力量成长
@@ -186,7 +248,7 @@ class Battle:
             self.hand.append(self.draw_pile.pop(0)); have_draw += 1
         for ent in self.entities.values():
             _tick_statuses(ent)
-        return self.to_snapshot()
+        return self.to_snapshot(), logs
 
     def end_turn(self):
         """敌方行动并推进回合。返回 (敌方结算日志, 意图)，日志按结算顺序供前端播放。"""
@@ -209,7 +271,8 @@ class Battle:
         self.collect_deaths(self.queue)
         # 战斗未结束则进入玩家下一回合（重新获得能量并抽牌）
         if self.battle_result() == "ongoing":
-            self.start_turn()
+            _snapshot, turn_log = self.start_turn()
+            logs.extend(turn_log)
         return logs, intent
 
     def _enemy_intent(self):
@@ -277,6 +340,15 @@ class Battle:
                 "name": ent["name"], "hp": ent["hp"], "max_hp": ent["max_hp"],
                 "block": ent["block"], "alive": ent["alive"], "statuses": ent["statuses"],
             }
+        companion_state = copy.deepcopy(self.companion_state)
+        if companion_state is not None:
+            ent = self.entities.get("companion")
+            if ent is not None:
+                companion_state["hp"] = ent["hp"]
+                companion_state["wounded"] = not ent["alive"] or ent["hp"] <= 0
+            else:
+                companion_state["hp"] = 0
+                companion_state["wounded"] = True
         return {
             "index": self.battle_index,
             "enemy": self.enemy_def["id"],
@@ -287,6 +359,7 @@ class Battle:
             "energy": self.energy, "max_energy": self.max_energy,
             "turn": self.turn, "in_turn": self.in_turn, "phase": self.phase,
             "truncated": self.truncated,
+            "companion_state": companion_state,
         }
 
     @classmethod
@@ -313,6 +386,15 @@ class Battle:
         b.in_turn = bstate.get("in_turn", False)
         b.phase = bstate.get("phase", 0)
         b.truncated = bstate.get("truncated", False)
+        b.companion_state = copy.deepcopy(bstate.get("companion_state"))
+        b.companion_def = (
+            companions_mod.COMPANIONS.get(b.companion_state.get("id"), companions_mod.SQUIRE)
+            if b.companion_state else None
+        )
+        if b.companion_state is not None and "companion" not in b.entities:
+            ent = companions_mod.snapshot_for_battle(b.companion_state)
+            if ent is not None:
+                b.entities["companion"] = ent
         b.queue = SettlementQueue(b)
         return b
 
@@ -327,6 +409,7 @@ class Battle:
             }
         return {
             "player": ents.get("player"), "enemy": ents.get("enemy"),
+            "companion": _public_entity(ents.get("companion")),
             "energy": self.energy, "max_energy": self.max_energy,
             "turn": self.turn, "in_turn": self.in_turn, "truncated": self.truncated,
             "hand": list(self.hand),
@@ -399,6 +482,17 @@ def _tick_statuses(ent):
         else:
             keep[sid] = s
     ent["statuses"] = keep
+
+
+def _public_entity(ent):
+    if ent is None:
+        return None
+    statuses = ent.get("statuses", {})
+    return {
+        "name": ent["name"], "hp": ent["hp"], "max_hp": ent["max_hp"],
+        "block": ent["block"], "alive": ent["alive"],
+        "statuses": statuses if isinstance(statuses, list) else _statuses_public(statuses),
+    }
 
 
 def _statuses_public(statuses):

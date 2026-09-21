@@ -47,6 +47,12 @@ export default function ReplayStage({ view, showShop }) {
     return (
       <div className="battle replay-battle">
         <div ref={mountRef} className="phaser" />
+        {b.companion && (
+          <div className={`battle-companion ${b.companion.alive === false || b.companion.hp <= 0 ? 'down' : ''}`}>
+            <b>🛡️ {b.companion.name}</b>
+            <span>{b.companion.hp}/{b.companion.max_hp}</span>
+          </div>
+        )}
         <div className="handbar replay-handbar">
           <div className="energy">能量 {b.energy} / {b.max_energy}</div>
           <div className="hand">

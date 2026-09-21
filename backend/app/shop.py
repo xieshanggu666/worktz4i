@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 
 from . import commissions as commissions_mod
+from . import companions as companions_mod
 from . import potions as potions_mod
 from .cards import CARDS
 from .rewards import ALL_RELIC_OPTIONS
@@ -46,7 +47,7 @@ def next_remove_cost(used):
 
 
 def generate_stock(stock_seed, owned_card_ids, owned_relic_ids,
-                   expedition_ctx=None):
+                   expedition_ctx=None, has_companion=False, has_potions=True):
     """确定性生成商人库存：若干张尚未持有的进阶/金色卡 + 若干个尚未持有的遗物。
 
     库存只依赖 (stock_seed, 进入时的持有集合)；持有集合本身由动作序列确定性派生，
@@ -75,8 +76,11 @@ def generate_stock(stock_seed, owned_card_ids, owned_relic_ids,
         "price": RELIC_PRICE[rid], "sold": False,
     } for rid in relic_pool[:RELIC_OFFER_COUNT]]
 
-    # 药水货架：可跨章携带的消耗品，背满时购买需指定替换格（见 service._shop_buy）
-    potion_offers = potions_mod.generate_shop_offers(stock_seed)
+    # 伙伴货架：一局限定一名伙伴，招募后不再出现
+    companion_offers = companions_mod.offer(has_companion)
+
+    # 药水货架：2.5.0+ 旧规则回放时关闭（旧商店结构没有该字段）
+    potion_offers = potions_mod.generate_shop_offers(stock_seed) if has_potions else []
 
     # 远征委托：与货架同一确定性种子派生（盐值错开），接取一项即从挂单移除
     if expedition_ctx is not None:
@@ -91,6 +95,7 @@ def generate_stock(stock_seed, owned_card_ids, owned_relic_ids,
         "seed": stock_seed,
         "cards": cards,
         "relics": relics,
+        "companions": companion_offers,
         "potions": potion_offers,
         "commission_offers": commission_offers,
         "remove": {"cost": REMOVE_BASE_COST, "used": 0},
@@ -124,6 +129,7 @@ def public_view(shop):
     return {
         "cards": [card_offer_view(it) for it in shop["cards"]],
         "relics": [relic_offer_view(it) for it in shop["relics"]],
+        "companions": [companions_mod.offer_view(it) for it in shop.get("companions", [])],
         "potions": [potion_offer_view(it) for it in shop.get("potions", [])],
         "commissions": commissions_mod.offers_public(shop.get("commission_offers", [])),
         "remove": {

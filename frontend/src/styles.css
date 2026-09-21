@@ -116,7 +116,7 @@ button.mini { font-size: 12px; padding: 4px 8px; }
 .mnode:disabled { cursor: default; }
 
 /* 战斗 */
-.battle { display: flex; flex-direction: column; gap: 10px; }
+.battle { display: flex; flex-direction: column; gap: 10px; position: relative; }
 .phaser { border: 1px solid #2b2b40; border-radius: 10px; overflow: hidden; background: #1a1a24; }
 .phaser canvas { display: block; max-width: 100%; height: auto; }
 .hint.settling { color: #ffd166; align-self: center; white-space: nowrap; }
@@ -415,3 +415,37 @@ button.mini { font-size: 12px; padding: 4px 8px; }
 .replace-warn { color: #ffb37b; font-style: normal; display: block; font-size: 11px; }
 .shopitem.potion { border-left-color: #48bfe3; }
 .battle .potion-belt { margin: 8px auto 0; max-width: 880px; }
+
+/* ---------- 伙伴 ---------- */
+.companion-card {
+  border: 1px solid #2c443a;
+  border-left: 3px solid #57b88f;
+  background: #17231f;
+  border-radius: 8px;
+  padding: 9px;
+  font-size: 13px;
+}
+.companion-card.wounded { border-color: #5a3038; border-left-color: #ff7b81; background: #2a1b20; }
+.companion-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.companion-head span { color: #7be0c0; font-size: 12px; }
+.companion-card.wounded .companion-head span { color: #ff9fa4; }
+.companion-hpbar { height: 7px; background: #111817; border-radius: 99px; overflow: hidden; margin-bottom: 5px; }
+.companion-hpbar i { display: block; height: 100%; background: linear-gradient(90deg, #3fb879, #7be0c0); }
+.companion-stats { color: #b8c7c0; font-size: 12px; }
+.companion-card p { margin: 7px 0; color: #94a39d; font-size: 12px; line-height: 1.45; }
+.companion-actions { display: flex; gap: 6px; }
+.shopitem.companion { border-left-color: #57b88f; }
+.battle-companion {
+  position: absolute;
+  left: 305px;
+  top: 54px;
+  z-index: 3;
+  background: rgba(20, 30, 28, .82);
+  border: 1px solid #3f7a64;
+  border-radius: 9px;
+  padding: 5px 9px;
+  font-size: 12px;
+  display: flex;
+  gap: 8px;
+}
+.battle-companion.down { opacity: .55; border-color: #704048; }

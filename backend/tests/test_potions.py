@@ -746,7 +746,7 @@ def test_potion_replay_isolated_and_recorded_versions(client):
     client.post(f"/api/runs/{rid}/act", json={"action": "use_potion", "slot": 0})
     replay = client.get(f"/api/runs/{rid}/replay").json()
     assert replay["isolated"] is True
-    assert "2.5.0" in replay["recorded_versions"]
+    assert service.RULES_VERSION in replay["recorded_versions"]
     step = next(s for s in replay["steps"] if s["action"] == "use_potion")
     assert step["kind"] == "battle" and "药水" in step["title"]
 

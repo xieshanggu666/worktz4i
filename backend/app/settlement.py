@@ -46,12 +46,21 @@ class SettlementQueue:
     def push(self, *events):
         self.pending.extend(events)
 
+    def push_front(self, *events):
+        self.pending[0:0] = events
+
     def run(self):
         """消费 pending 直至清空、目标全部死亡或触发计数达上限。返回过程日志。"""
         while self.pending and self.counter < self.limit:
             ev = self.pending.pop(0)
             if self.engine.is_dead(ev.target):
                 continue  # 目标已死，跳过（死亡打断的关键：后续连锁不再作用死目标）
+            before_resolve = getattr(self.engine, "before_resolve", None)
+            pre = before_resolve(ev) if before_resolve else []
+            if pre:
+                # 前置连锁（如伙伴援护）必须先于当前事件结算
+                self.push_front(*pre, ev)
+                continue
             self.counter += 1
             children = self.engine.resolve(ev)
             self.log.append(ev.to_log())

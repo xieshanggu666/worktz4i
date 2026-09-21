@@ -116,6 +116,12 @@ export default function BattleView({ view }) {
   return (
     <div className="battle">
       <div ref={mountRef} className="phaser" />
+      {b?.companion && (
+        <div className={`battle-companion ${b.companion.alive === false || b.companion.hp <= 0 ? 'down' : ''}`}>
+          <b>🛡️ {b.companion.name}</b>
+          <span>{b.companion.hp}/{b.companion.max_hp}</span>
+        </div>
+      )}
       <PotionBelt inBattle busy={busy} onUse={usePotion} />
       <div className="handbar">
         <div className="energy">能量 {energy} / {b?.max_energy ?? view.energy}</div>
@@ -173,8 +179,9 @@ function fmtEvent(ev) {
     if (ev.result === 'run_won') return '🏆 通关！'
     return '🎉 胜利！'
   }
+  if (ev.companion_turn) return `🛡️ ${ev.companion_turn.name} 随行攻击`
   if (ev.snapshot) return ''
-  const tgt = ev.target === 'player' ? '你' : '敌'
+  const tgt = ev.target === 'player' ? '你' : ev.target === 'companion' ? '伙伴' : '敌'
   switch (ev.action) {
     case 'enemy_turn':
       return `— 敌方回合${ev.extra?.name ? `：${ev.extra.name}` : ''} —`

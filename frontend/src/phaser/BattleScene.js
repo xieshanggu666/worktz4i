@@ -11,9 +11,10 @@ const H = 480
 const GROUND_Y = 330
 const POS = {
   player: { x: 200, y: GROUND_Y },
+  companion: { x: 355, y: GROUND_Y + 12 },
   enemy: { x: 760, y: GROUND_Y },
 }
-const BODY_COLOR = { player: 0x3a7bd5, enemy: 0xe04850 }
+const BODY_COLOR = { player: 0x3a7bd5, companion: 0x57b88f, enemy: 0xe04850 }
 const BAR_W = 150
 
 // 状态 id -> 中文名（与后端 STATUS_INFO 对齐，供浮动文字/状态行展示）
@@ -26,7 +27,7 @@ export const STATUS_ZH = {
   power_up: '增伤',
 }
 
-const targetKeyOf = (ev) => (ev.target === 'player' ? 'player' : 'enemy')
+const targetKeyOf = (ev) => (ev.target === 'player' || ev.target === 'companion' ? ev.target : 'enemy')
 
 // ---------- 绘制 ----------
 function drawBackdrop(scene) {
@@ -98,7 +99,7 @@ function drawBody(scene, ent, gray) {
 }
 
 function buildEntity(scene, key) {
-  const radius = key === 'player' ? 40 : 44
+  const radius = key === 'player' ? 40 : key === 'companion' ? 28 : 44
   const container = scene.add.container(POS[key].x, POS[key].y).setDepth(2)
   const bar = scene.add.graphics()
   const body = scene.add.graphics()
@@ -131,9 +132,10 @@ export default class BattleScene extends Phaser.Scene {
     drawBackdrop(this)
     this.entities = {
       player: buildEntity(this, 'player'),
+      companion: buildEntity(this, 'companion'),
       enemy: buildEntity(this, 'enemy'),
     }
-    this.display = { player: null, enemy: null }
+    this.display = { player: null, companion: null, enemy: null }
 
     this.turnText = this.add.text(16, 12, '', { font: '13px sans-serif', fill: '#889' }).setDepth(10)
     this.bannerText = this.add.text(W / 2, 92, '', {
@@ -153,8 +155,10 @@ export default class BattleScene extends Phaser.Scene {
     // 占位快照：React 收到 phaser_ready 后会立即补发真实快照（续局恢复也走这条路）
     this.applySnapshot({
       player: { name: '勇者', hp: 1, max_hp: 1, block: 0, alive: true, statuses: [] },
+      companion: { name: '伙伴', hp: 0, max_hp: 1, block: 0, alive: false, statuses: [] },
       enemy: { name: '敌人', hp: 1, max_hp: 1, block: 0, alive: true, statuses: [] },
     })
+    this.entities.companion.container.setAlpha(0)
     bus.emit('phaser_ready')
   }
 
@@ -170,9 +174,14 @@ export default class BattleScene extends Phaser.Scene {
 
   applySnapshot(s) {
     if (!s) return
-    for (const key of ['player', 'enemy']) {
+    for (const key of ['player', 'companion', 'enemy']) {
       const d = s[key]
       if (!d) continue
+      if (key === 'companion') {
+        const hp = d.hp ?? 0
+        const alive = d.alive !== false && hp > 0
+        this.entities.companion.container.setAlpha(alive ? 1 : 0.3)
+      }
       if (key === 'enemy' && s.enemy_id && s.enemy_id !== this.enemyId) {
         this.enemyId = s.enemy_id
         const ent = this.entities.enemy
@@ -288,6 +297,10 @@ export default class BattleScene extends Phaser.Scene {
     // 药水消耗标记：先弹横幅，再按后续效果事件逐条结算
     if (entry.potion) {
       await this.banner(`🧪 ${entry.potion.name || '药水'}`, '#7be0ff', 380)
+      return
+    }
+    if (entry.companion_turn) {
+      await this.banner(`🛡️ ${entry.companion_turn.name || '伙伴'}协助攻击`, '#7be0c0', 320)
       return
     }
     // 战斗结果（死亡动画 + 横幅），附带权威快照

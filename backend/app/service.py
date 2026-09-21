@@ -14,6 +14,7 @@ from . import forging as forging_mod
 from . import shop as shop_mod
 from . import commissions as commission_mod
 from . import potions as potions_mod
+from . import companions as companions_mod
 from .cards import all_cards, get_card
 from .engine import Battle, _statuses_public
 from .forging import FORGE_COST, effective_card, node_name, growth_node_cost, validate_unlock
@@ -36,8 +37,12 @@ from .settlement import EffectEvent, SettlementQueue
 #        替换格），战斗中玩家回合可使用（消耗与战斗效果同一动作原子结算，
 #        死亡打断/胜负/领奖/解锁与原战斗步骤同路径），非战斗可主动丢弃。
 #        旧档无该字段，首次载入时 setdefault 空背包（结构迁移，本步按 legacy 处理）。
-RULES_VERSION = "2.5.0"
+# 2.6.0：伙伴模块——companion 进入 run 状态与交接快照；商店限招一名，可随行/休整；
+#        随行伙伴按回合协助战斗并援护玩家，生命归零后负伤暂停参战，休整伙伴在
+#        休息节点治疗；招募扣款、战斗伤害与治疗全部复用普通动作和统一结算队列。
+RULES_VERSION = "2.6.0"
 GROWTH_RULES_VERSION = "2.3.0"  # 成长树规则起始版本：更早的 forge 日志走兼容重演
+COMPANION_RULES_VERSION = "2.6.0"  # 伙伴字段进入 run 状态：更早日志的迁移步前按 legacy 比对
 
 
 def _ver_lt(ver, baseline):
@@ -108,6 +113,7 @@ def _new_run_state(seed, carry=None, chapter=None, chapters_total=None, expediti
             "relics": {}, "gold": 0,
             "max_health": 75, "health": 75, "base_energy": 3,
             "potions": [],
+            "companion": None,
         }
         heal = 0
     else:
@@ -131,6 +137,8 @@ def _new_run_state(seed, carry=None, chapter=None, chapters_total=None, expediti
         "relics": dict(carry.get("relics", {})),
         # 药水背包：按下标排列的药水 id 列表（限容量，可跨章携带）；旧章快照缺省为空
         "potions": list(carry.get("potions", [])),
+        # 伙伴：持久招募状态（id/mode/hp/wounded），随行/负伤随快照跨章继承
+        "companion": copy.deepcopy(carry.get("companion")),
         # 远征委托：uid 单调发号器 + 委托实例（接取/进度/领奖/超期/战败失败）
         "next_commission_seq": carry.get("next_commission_seq", 1),
         "commissions": copy.deepcopy(carry.get("commissions", [])),
@@ -231,6 +239,13 @@ def _migrate_state(run):
     if "potions" not in run:
         run["potions"] = []
         changed = True
+    companion, companion_changed = companions_mod.normalize_state(run.get("companion"))
+    if "companion" not in run:
+        run["companion"] = None
+        changed = True
+    elif companion_changed:
+        run["companion"] = companion
+        changed = True
     return changed
 
 
@@ -280,6 +295,7 @@ def _carry_from_run(run):
         "health": run["health"],
         "base_energy": run.get("base_energy", 3),
         "potions": list(run.get("potions", [])),
+        "companion": copy.deepcopy(run.get("companion")),
         "commissions": copy.deepcopy(run.get("commissions", [])),
         "next_commission_seq": run.get("next_commission_seq", 1),
         "chapter": run.get("chapter"),
@@ -318,6 +334,7 @@ def _carry_public(carry):
         "health": carry.get("health"),
         "max_health": carry.get("max_health"),
         "potions": [potions_mod.public_potion(pid) for pid in carry.get("potions", [])],
+        "companion": companions_mod.public_companion(carry.get("companion")),
         "commissions": [
             commission_mod.commission_public(c, carry.get("chapter") or 0)
             for c in carry.get("commissions", [])
@@ -811,9 +828,27 @@ def _build_battle(run_state, node_data):
         enemy_def, seed=run_state["seed"], battle_index=run_state["battle_index"],
         boss_hp_bonus=boss_hp_bonus,
         card_instances=run_state.get("card_instances", {}),
+        companion_state=run_state.get("companion"),
     )
-    battle.start_turn()
-    return battle
+    _snapshot, initial_log = battle.start_turn()
+    return battle, initial_log
+
+
+def _sync_companion_from_battle(run, battle):
+    """把战斗内伙伴实体生命/负伤同步回持久伙伴状态（战斗外的休整状态原样保留）。"""
+    companion = run.get("companion")
+    if not companion:
+        return
+    ent = battle.entities.get("companion")
+    if ent is None:
+        # 休整模式或战前已负伤：持久状态不变，不参与本场战斗
+        return
+    companion["hp"] = ent["hp"]
+    wounded = not ent["alive"] or ent["hp"] <= 0
+    companion["wounded"] = wounded
+    if wounded:
+        # 负伤后自动转入休整：暂停后续参战，直到休息节点治疗并重新安排随行
+        companion["mode"] = companions_mod.REST
 
 
 def _load_battle(run_state):
@@ -824,6 +859,15 @@ def _load_battle(run_state):
     battle = Battle.from_state(bstate, enemy_def, run_state["seed"],
                                health=run_state["health"], max_health=run_state["max_health"])
     battle.card_instances = dict(instances)
+    battle.companion_state = copy.deepcopy(bstate.get("companion_state"))
+    battle.companion_def = (
+        companions_mod.COMPANIONS.get(battle.companion_state.get("id"), companions_mod.SQUIRE)
+        if battle.companion_state else None
+    )
+    if battle.companion_state is not None and "companion" not in battle.entities:
+        ent = companions_mod.snapshot_for_battle(battle.companion_state)
+        if ent is not None:
+            battle.entities["companion"] = ent
     return battle
 
 
@@ -905,6 +949,7 @@ def act(run_id, action):
                 "commission": action.get("commission"),
                 "slot": action.get("slot"),
                 "replace": action.get("replace"),
+                "mode": action.get("mode"),
                 "ver": RULES_VERSION, "ckpt": state_checkpoint(run),
             }
             if migrated:
@@ -948,8 +993,8 @@ def _apply_action(run, a, action, map_data, grant_unlocks=False):
     不读写数据库、不迁移存档——调用方负责准备好已迁移的状态。
     """
     if a == "choose_node":
-        _choose_node(run, map_data, action["node"])
-        return []
+        return _choose_node(run, map_data, action["node"],
+                            grant_unlocks=grant_unlocks)
     if a == "play":
         return _play(run, action["card"], grant_unlocks=grant_unlocks)
     if a == "end_turn":
@@ -968,6 +1013,8 @@ def _apply_action(run, a, action, map_data, grant_unlocks=False):
         return _use_potion(run, action.get("slot"), grant_unlocks=grant_unlocks)
     if a == "discard_potion":
         return _discard_potion(run, action.get("slot"))
+    if a == "companion_set_mode":
+        return _companion_set_mode(run, action.get("mode"))
     if a == "commission_accept":
         return _commission_accept(run, action.get("sku"),
                                   legacy_offer=action.get("_legacy_offer"),
@@ -977,12 +1024,13 @@ def _apply_action(run, a, action, map_data, grant_unlocks=False):
     raise InvalidAction(f"unknown action {a}")
 
 
-def _choose_node(run, map_data, node):
+def _choose_node(run, map_data, node, grant_unlocks=True):
     from_current = map_data["routes"].get(run["position"], [])
     if run["position"] != mapgen.BOSS and node not in from_current:
         raise InvalidAction(f"node {node} unreachable from {run['position']}")
     node_data = map_data["nodes"][node]
     run["position"] = node
+    initial_log = []
     # 每进入一个新节点都清掉上个节点的商店库存（商店仅在其节点内有效）
     run["shop"] = None
 
@@ -990,21 +1038,30 @@ def _choose_node(run, map_data, node):
     if t in (mapgen.ENCOUNTER, mapgen.ELITE, mapgen.BOSS):
         run["in_battle"] = True
         run["battle_index"] += 1
-        battle = _build_battle(run, node_data)
+        battle, companion_log = _build_battle(run, node_data)
+        initial_log = list(companion_log)
+        if battle.battle_result() != "ongoing":
+            # 极端情况下伙伴开场攻击直接结束战斗：奖励/章节状态仍走统一战后结算
+            return _after_battle_step(run, battle, initial_log, grant_unlocks=grant_unlocks)
         run["battle"] = battle.dump()
         run["health"] = battle.entities["player"]["hp"]
+        _sync_companion_from_battle(run, battle)
         run["reward_options"] = []
         run["reward_claimed"] = True
         run["forge_claimed"] = True
-        battle_start = battle.to_snapshot()["hand"]
+        initial_log.append({"snapshot": battle.to_snapshot()})
         run["events_log"].append({"at": f"battle:{node}:{run['battle_index']}", "battle": True})
     elif t == mapgen.REST:
         heal = max(1, int(run["max_health"] * 0.2))
         run["health"] = min(run["max_health"], run["health"] + heal)
+        companion_healed, companion_heal = companions_mod.heal_resting(run.get("companion"))
         run["reward_options"] = []
         run["reward_claimed"] = True
         run["forge_claimed"] = True
-        run["events_log"].append({"at": f"rest:{node}", "heal": heal})
+        rest_log = {"at": f"rest:{node}", "heal": heal}
+        if companion_healed:
+            rest_log["companion_healed"] = companion_heal
+        run["events_log"].append(rest_log)
     elif t == mapgen.REWARD:
         run["in_battle"] = False
         run["battle"] = None
@@ -1037,8 +1094,11 @@ def _choose_node(run, map_data, node):
             }
         else:
             expedition_ctx = None
-        run["shop"] = shop_mod.generate_stock(stock_seed, owned_cards, set(run["relics"]),
-                                              expedition_ctx=expedition_ctx)
+        run["shop"] = shop_mod.generate_stock(
+            stock_seed, owned_cards, set(run["relics"]),
+            expedition_ctx=expedition_ctx,
+            has_companion=bool(run.get("companion")) and not run.get(_LEGACY_NO_COMPANION_KEY),
+            has_potions=not run.get(_LEGACY_NO_POTIONS_KEY))
         run["events_log"].append({"at": f"shop:{node}",
                                   "cards": len(run["shop"]["cards"]),
                                   "relics": len(run["shop"]["relics"]),
@@ -1046,6 +1106,7 @@ def _choose_node(run, map_data, node):
     elif t == "start":
         run["reward_claimed"] = True
         run["forge_claimed"] = True
+    return initial_log
 
 
 def _battle_or_raise(run):
@@ -1175,10 +1236,36 @@ def _discard_potion(run, slot):
     return [{"potion_discarded": {"slot": idx, "id": pid, "name": pdef["name"]}}]
 
 
+def _companion_set_mode(run, mode):
+    """在非战斗时安排伙伴随行或休整。
+
+    休整不是治疗本身：进入休息节点时仅休整中的伙伴会被治疗。这样玩家可在危险
+    战斗前主动让低血量伙伴休整，也能明确选择继续随行承担援护风险。
+    """
+    if mode not in (companions_mod.ACCOMPANY, companions_mod.REST):
+        raise InvalidAction("companion mode must be accompany or rest")
+    companion = run.get("companion")
+    if not companion:
+        raise InvalidAction("no companion recruited")
+    if run.get("in_battle"):
+        raise InvalidAction("cannot change companion mode during battle")
+    if run["status"] != "in_progress":
+        raise InvalidAction("run already ended")
+    if companion.get("mode") == mode:
+        raise DuplicateReward(f"companion already {mode}")
+    companion["mode"] = mode
+    run["events_log"].append({
+        "at": f"companion:{run['position']}", "mode": mode,
+        "wounded": bool(companion.get("wounded")),
+    })
+    return [{"companion_mode": companions_mod.public_companion(companion)}]
+
+
 def _after_battle_step(run, battle, log, grant_unlocks=True):
     snap = battle.to_snapshot()
     result = battle.battle_result()
     run["health"] = battle.entities["player"]["hp"]
+    _sync_companion_from_battle(run, battle)
     if result == "ongoing":
         run["battle"] = battle.dump()
         log.append({"snapshot": snap})
@@ -1392,8 +1479,10 @@ def _find_offer(shop, kind, sku):
         bucket = shop["relics"]
     elif kind == "potion":
         bucket = shop.get("potions", [])
+    elif kind == "companion":
+        bucket = shop.get("companions", [])
     else:
-        raise InvalidAction("unknown shop shelf (kind must be card/relic/potion)")
+        raise InvalidAction("unknown shop shelf (kind must be card/relic/potion/companion)")
     item = next((it for it in bucket if it["sku"] == sku), None)
     if item is None:
         raise InvalidAction("unknown shop item")
@@ -1447,6 +1536,17 @@ def _shop_buy(run, kind, sku, replace=None):
             slot, discarded = _add_potion(r, pid, replace)
             next(it for it in r["shop"]["potions"] if it["sku"] == sku)["sold"] = True
             return {"potion": pid, "slot": slot, "discarded": discarded}
+    elif kind == "companion":
+        cid = item["companion"]
+        if run.get("companion"):
+            raise ShopSoldOut("companion already recruited")
+
+        def mutate(r):
+            r["gold"] -= price
+            companion = companions_mod.make_companion(cid)
+            r["companion"] = companion
+            next(it for it in r["shop"]["companions"] if it["sku"] == sku)["sold"] = True
+            return {"companion": cid, "name": companion["name"]}
     else:
         rid = item["relic"]
         if rid in run["relics"]:
@@ -1656,16 +1756,25 @@ def resume(run_id):
 # - _pending_unlock 是在线行动在内存中暂存的战败解锁，随事务提交到 profile，
 #   不属于 run 状态本身（绝不写入 state_json）
 _PENDING_UNLOCK_KEY = "_pending_unlock"
-_CKPT_SKIP_KEYS = {"events_log", _PENDING_UNLOCK_KEY}
+_LEGACY_NO_COMPANION_KEY = "_legacy_no_companion"
+_LEGACY_NO_POTIONS_KEY = "_legacy_no_potions"
+_CKPT_SKIP_KEYS = {
+    "events_log", _PENDING_UNLOCK_KEY, _LEGACY_NO_COMPANION_KEY,
+    _LEGACY_NO_POTIONS_KEY, "_ckpt_skip_keys",
+}
 
 
-def state_checkpoint(run):
+def state_checkpoint(run, include_companion=True, include_potions=True):
     """权威状态校验点：对完整 run 状态取稳定哈希（SHA-256 截断 16 位）。
 
-    回放每重演一步就与动作日志里记录的 ckpt 比对；不一致说明规则版本变化、
-    日志损坏或确定性被破坏（而不是悄悄播一份错误的历史）。
+    include_*=False 仅用于旧规则升级时的历史初态/迁移前哈希兼容。
     """
-    material = {k: v for k, v in run.items() if k not in _CKPT_SKIP_KEYS}
+    skip = set(_CKPT_SKIP_KEYS)
+    if not include_companion:
+        skip.add("companion")
+    if not include_potions:
+        skip.add("potions")
+    material = {k: v for k, v in run.items() if k not in skip}
     blob = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -1689,8 +1798,11 @@ def _create_ckpt_candidates(seed, create_payload):
     recorded_ver = create_payload.get("ver")
     if recorded_ver:
         sim["rules_version"] = recorded_ver
-    fixed_ckpt = state_checkpoint(sim)
-    buggy_ckpt = None
+    full_ckpt = state_checkpoint(sim)
+    no_companion_ckpt = state_checkpoint(sim, include_companion=False)
+    no_potions_ckpt = state_checkpoint(sim, include_potions=False)
+    legacy_shape_ckpt = state_checkpoint(sim, include_companion=False, include_potions=False)
+    buggy = None
     if carry is not None and chapter is not None and chapter > 1:
         buggy = _new_run_state(
             seed, carry=carry,
@@ -1699,8 +1811,29 @@ def _create_ckpt_candidates(seed, create_payload):
             expedition_id=create_payload.get("expedition"))
         if recorded_ver:
             buggy["rules_version"] = recorded_ver
-        buggy_ckpt = state_checkpoint(buggy)
-    return sim, fixed_ckpt, buggy_ckpt
+    candidates = {
+        "full": (state_checkpoint(buggy) if buggy is not None else None, full_ckpt),
+        "no_companion": (state_checkpoint(buggy, include_companion=False)
+                         if buggy is not None else None, no_companion_ckpt),
+        "no_potions": (state_checkpoint(buggy, include_potions=False)
+                       if buggy is not None else None, no_potions_ckpt),
+        "legacy_shape": (state_checkpoint(buggy, include_companion=False, include_potions=False)
+                         if buggy is not None else None, legacy_shape_ckpt),
+    }
+    recorded = create_payload.get("ckpt") if not create_payload.get("_corrupt") else None
+    matched_shape = "full"
+    matched_buggy_ckpt = candidates["full"][0]
+    fixed_ckpt = full_ckpt
+    if recorded is not None:
+        for shape, (buggy_hash, fixed_hash) in candidates.items():
+            if recorded in (buggy_hash, fixed_hash):
+                matched_shape = shape
+                matched_buggy_ckpt = buggy_hash
+                fixed_ckpt = recorded
+                break
+    pre_companion = matched_shape in ("no_companion", "legacy_shape")
+    pre_potions = matched_shape in ("no_potions", "legacy_shape")
+    return sim, fixed_ckpt, matched_buggy_ckpt, pre_companion, pre_potions
 
 
 def _replay_commission_maps(conn, exp_id, run_id):
@@ -1781,15 +1914,21 @@ def replay(run_id):
         {},
     )
     # 修复后正确初态 + 旧版错误初态两个候选：用记录的 create ckpt 识别受影响旧日志
-    sim, initial_ckpt, buggy_ckpt = _create_ckpt_candidates(seed, create_payload)
+    (sim, initial_ckpt, buggy_ckpt,
+     pre_companion_create, pre_potions_create) = _create_ckpt_candidates(seed, create_payload)
     recorded_initial = (create_payload.get("ckpt")
                         if not create_payload.get("_corrupt") else None)
+    pre_companion_replay = pre_companion_create
+    pre_potions_replay = pre_potions_create
+    companion_migration_seen = not pre_companion_replay
+    potions_migration_seen = not pre_potions_replay
     # 受影响章（记录的是错误初态哈希）：整段走兼容修复——沿修复后的正确路径重放，
     # 修复点之前的历史步骤记录的是错误状态哈希，按 legacy 跳过逐位比对；修复点
     # （在线迁移发生的首个动作）及之后严格比对。最终帧与在线修复后的存档一致。
+    fixed_current_ckpt = state_checkpoint(sim)
     legacy_chapter = bool(
         recorded_initial and buggy_ckpt is not None
-        and recorded_initial == buggy_ckpt and recorded_initial != initial_ckpt)
+        and recorded_initial == buggy_ckpt and recorded_initial != fixed_current_ckpt)
 
     fixed_chapter = create_payload.get("chapter")
     chapters_total = create_payload.get("chapters_total")
@@ -1805,10 +1944,6 @@ def replay(run_id):
         carry = create_payload.get("carry") or {}
         carry_commissions = carry.get("commissions", [])
         carry_ids = {c["id"] for c in carry_commissions}
-        # 与在线迁移等价：在重放任何历史动作之前，先把正确初态里随快照带入的委托
-        # 校正（真实接取章/deadline/领奖记录/撤销被旧超期判定误判失败的进行中委托）。
-        # 此后沿修复路径重放：本章新接取经注入的修复挂单项进入，最终帧与在线
-        # 修复后的存档逐位一致；历史 ckpt 记录的是错误状态，按 legacy 跳过比对。
         _repair_commissions_pure(
             sim.get("commissions", []), fixed_chapter, chapters_total,
             accepted_chapter=accepted_chapter,
@@ -1817,6 +1952,15 @@ def replay(run_id):
             revive_chapter=fixed_chapter)
         # 货架未接取挂单同样重新锚定到真实当前章（在线修复同款，保证逐位一致）
         reanchor_shop_commission_offers(sim.get("shop"), fixed_chapter, chapters_total)
+    if pre_companion_replay:
+        sim[_LEGACY_NO_COMPANION_KEY] = True
+        if sim.get("shop"):
+            sim["shop"].pop("companions", None)
+    if pre_potions_replay:
+        sim[_LEGACY_NO_POTIONS_KEY] = True
+        sim["potions"] = []
+        if sim.get("shop"):
+            sim["shop"].pop("potions", None)
     # 远征章节 run：帧视口携带远征摘要（只读，不阻断回放）
     exp_badge = None
     if rec.get("expedition_id"):
@@ -1843,21 +1987,34 @@ def replay(run_id):
         ver = payload.get("ver") if not corrupt_row else None
         if ver:
             versions.add(ver)
-        # 受影响旧日志的修复点：在线迁移落库步（migrated）或首个 2.4.0 新事件。
-        # 从该步起记录的哈希已对应修复后状态，本步及以后恢复严格校验。
+        # 受影响旧日志的修复点：在线迁移落库步（migrated）、首个当前版本事件，
+        # 或首个晚于伙伴/药水字段引入版本的事件。越过该点后新字段校验点恢复完整。
         at_fix_point = legacy_chapter and not post_fix and (
-            migrated_step or (ver and not _ver_lt(ver, RULES_VERSION)))
+            migrated_step or (ver and not _ver_lt(ver, RULES_VERSION))
+            or (pre_companion_replay and ver and not _ver_lt(ver, COMPANION_RULES_VERSION))
+            or (pre_potions_replay and ver and not _ver_lt(ver, "2.5.0")))
         if at_fix_point:
             post_fix = True
+            companion_migration_seen = True
+            potions_migration_seen = True
+            sim.setdefault("companion", None)
+            sim.setdefault("potions", [])
+            sim.pop(_LEGACY_NO_COMPANION_KEY, None)
+            sim.pop(_LEGACY_NO_POTIONS_KEY, None)
         # 修复点之前（不含 create 与修复点本身）记录的是错误状态，按 legacy 处理
         pre_repair = (legacy_chapter and not post_fix
                       and ev["action"] != "create" and not at_fix_point)
         create_of_legacy = (legacy_chapter and ev["action"] == "create"
                             and not post_fix)
+        pre_companion_step = (pre_companion_replay and not companion_migration_seen
+                              and not at_fix_point and ev["action"] != "create")
+        pre_potions_step = (pre_potions_replay and not potions_migration_seen
+                            and not at_fix_point and ev["action"] != "create")
         # 损坏行没有可信版本号，按旧日志处理但仍会因推演失败标注 error
         is_legacy = not ver
-        skip_ckpt = corrupt_row or migrated_step or pre_repair or create_of_legacy
-        if is_legacy or migrated_step or pre_repair or create_of_legacy:
+        skip_ckpt = (corrupt_row or migrated_step or pre_repair or create_of_legacy
+                     or pre_companion_step or pre_potions_step)
+        if is_legacy or migrated_step or pre_repair or create_of_legacy or pre_companion_step or pre_potions_step:
             legacy_steps += 1
         if pre_repair:
             repaired_steps += 1
@@ -1895,11 +2052,29 @@ def replay(run_id):
                         replay_action["_legacy_offer"] = offer
                         replay_action["_legacy_ignore_cap"] = True
                 log = _apply_action(sim, a, replay_action, map_data, grant_unlocks=False)
+                if pre_companion_replay and ver and not _ver_lt(ver, COMPANION_RULES_VERSION):
+                    companion_migration_seen = True
+                    sim.pop(_LEGACY_NO_COMPANION_KEY, None)
+                    sim.setdefault("companion", None)
+                if pre_potions_replay and ver and not _ver_lt(ver, "2.5.0"):
+                    potions_migration_seen = True
+                    sim.pop(_LEGACY_NO_POTIONS_KEY, None)
+                    sim.setdefault("potions", [])
+                if sim.get("shop") and not companion_migration_seen:
+                    sim["shop"].pop("companions", None)
+                if sim.get("shop") and not potions_migration_seen:
+                    sim["shop"].pop("potions", None)
             except Exception as e:  # 损坏/越权动作不抹掉整段回放：断在此步并标注
                 error = f"{type(e).__name__}: {e}"
                 skipped_errors += 1
 
-        actual = state_checkpoint(sim)
+        # create 帧在循环外已完成修复/兼容形状调整：直接使用候选校验点，
+        # 不再对修复后的 sim 重新取哈希（修复前记录的就是待修复初态）。
+        actual = initial_ckpt if a == "create" else state_checkpoint(
+            sim,
+            include_companion=not pre_companion_step,
+            include_potions=not pre_potions_step,
+        )
         if error:
             status = "error"
         elif not recorded:
@@ -1926,7 +2101,8 @@ def replay(run_id):
             "view": _public_view(sim, map_data, run_id, include_unlocks=False,
                                  expedition=exp_badge),
             "check": status,
-            "legacy": is_legacy or migrated_step or pre_repair or create_of_legacy,
+            "legacy": (is_legacy or migrated_step or pre_repair
+                       or create_of_legacy or pre_companion_step or pre_potions_step),
             "migrated": migrated_step,
             "repaired": pre_repair,
             "error": error,
@@ -1986,6 +2162,8 @@ def _step_kind(sim, action, payload, log):
         return "commission"
     if action == "discard_potion":
         return "potion"
+    if action == "companion_set_mode":
+        return "companion"
     if action == "create":
         return "create"
     return "other"
@@ -2053,6 +2231,9 @@ def _step_title(sim, map_data, action, payload, log):
         d = next((x.get("potion_discarded") for x in log
                   if isinstance(x, dict) and x.get("potion_discarded")), None)
         return f"丢弃药水「{d['name']}」" if d else "丢弃药水"
+    if action == "companion_set_mode":
+        mode = payload.get("mode")
+        return "伙伴随行" if mode == companions_mod.ACCOMPANY else "伙伴休整"
     return action
 
 
@@ -2067,6 +2248,8 @@ def _step_summary(action, payload, log):
                 if tx.get("discarded"):
                     dname = potions_mod.POTIONS.get(tx["discarded"], {}).get("name", tx["discarded"])
                     base += f"（替换丢弃「{dname}」）"
+            elif action == "shop_buy" and tx.get("kind") == "companion":
+                base = f"招募伙伴「{tx.get('name')}」，花费 {tx.get('price')}，余额 {tx.get('gold_left')}"
             else:
                 base = f"花费 {tx.get('price')}，余额 {tx.get('gold_left')}"
             ready = [x for x in log if isinstance(x, dict)
@@ -2115,6 +2298,8 @@ def _step_summary(action, payload, log):
         d = next((x.get("potion_discarded") for x in log
                   if isinstance(x, dict) and x.get("potion_discarded")), None)
         return f"丢弃药水「{d['name']}」" if d else "丢弃药水"
+    if action == "companion_set_mode":
+        return "随行参战" if payload.get("mode") == companions_mod.ACCOMPANY else "休整待命；休息节点可治疗"
     if action == "choose_node" and payload.get("node"):
         return f"位置 → {payload['node']}"
     return ""
@@ -2170,6 +2355,7 @@ def _public_view(run, map_data, run_id, include_unlocks=True, rev=None, expediti
         snap = {
             "player": pub_ent("player"),
             "enemy": pub_ent("enemy"),
+            "companion": pub_ent("companion") if "companion" in run["battle"]["entities"] else None,
             "energy": run["battle"]["energy"],
             "max_energy": run["battle"]["max_energy"],
             "turn": run["battle"]["turn"],
@@ -2210,6 +2396,7 @@ def _public_view(run, map_data, run_id, include_unlocks=True, rev=None, expediti
         "relics": dict(run["relics"]),
         "potions": potions_mod.belt_public(run.get("potions", [])),
         "potion_capacity": potions_mod.POTION_CAPACITY,
+        "companion": companions_mod.public_companion(run.get("companion")),
         "potion_catalog": [potions_mod.public_potion(pid) for pid in sorted(potions_mod.POTIONS)],
         "reward_options": list(run["reward_options"]),
         "reward_claimed": run["reward_claimed"],

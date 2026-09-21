@@ -38,6 +38,12 @@ def _buggy_new_run_state(seed, carry, nxt, chapters_total, exp_id):
         expedition_id=exp_id)
     state["chapter"] = carry.get("chapter")
     state["rules_version"] = "2.3.0"
+    # 该夹具复刻 2.3 旧状态：伙伴与药水字段均尚未加入状态结构
+    state.pop("companion", None)
+    state.pop("potions", None)
+    carry.pop("companion", None)
+    carry.pop("potions", None)
+    # create 校验点必须记录旧状态形状（含未迁移的章号）
     return state
 
 
@@ -56,11 +62,13 @@ def _buggy_advance(exp_id):
             service._chapter_seed(row["seed"], nxt), carry, nxt,
             row["chapters_total"], exp_id)
         map_data = service.mapgen.generate_map(state["seed"])
+        legacy_ckpt = service.state_checkpoint(
+            state, include_companion=False, include_potions=False)
         db.insert_run(conn, run_id, state["seed"], state["status"], state["position"],
                       map_data, state, expedition_id=exp_id, chapter=nxt)
         db.append_event_conn(conn, run_id, 1, "create", {
             "seed": state["seed"], "ver": "2.3.0",
-            "ckpt": service.state_checkpoint(state),
+            "ckpt": legacy_ckpt,
             "expedition": exp_id, "chapter": nxt,
             "chapters_total": row["chapters_total"], "carry": carry,
         })
@@ -83,6 +91,12 @@ def _buggy_act(run_id, action_dict):
         map_data = json.loads(row["map_json"])
         service._apply_action(state, action_dict["action"], action_dict,
                               map_data, grant_unlocks=False)
+        # 2.3 旧版没有伙伴/药水背包，也没有伙伴货架
+        state.pop("companion", None)
+        state.pop("potions", None)
+        if state.get("shop"):
+            state["shop"].pop("companions", None)
+            state["shop"].pop("potions", None)
         # 旧版没有战败解锁落库（测试路径不依赖）；同步远征通关/结算
         rec = {"id": run_id, "chapter": row["chapter"],
                "expedition_id": row["expedition_id"]}
@@ -97,7 +111,9 @@ def _buggy_act(run_id, action_dict):
             "branch": action_dict.get("branch"),
             "kind": action_dict.get("kind"), "sku": action_dict.get("sku"),
             "commission": action_dict.get("commission"),
-            "ver": "2.3.0", "ckpt": service.state_checkpoint(state)}
+            "ver": "2.3.0",
+            "ckpt": service.state_checkpoint(
+                state, include_companion=False, include_potions=False)}
         db.append_event_conn(conn, run_id, seq, action_dict["action"], payload)
     return state
 
@@ -394,7 +410,9 @@ def _buggy_chapter_state_from_carry(exp_id, carry, nxt, chapters_total, run_id=N
                           expedition_id=exp_id, chapter=nxt)
         db.append_event_conn(conn, run_id, 1, "create", {
             "seed": state["seed"], "ver": "2.3.0",
-            "ckpt": service.state_checkpoint(state), "expedition": exp_id,
+            "ckpt": service.state_checkpoint(
+                state, include_companion=False, include_potions=False),
+            "expedition": exp_id,
             "chapter": nxt, "chapters_total": chapters_total, "carry": carry})
         db.save_expedition_conn(conn, exp_id, "in_progress", nxt, run_id, carry,
                                 expected_rev=row["rev"])

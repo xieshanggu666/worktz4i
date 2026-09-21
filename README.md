@@ -16,6 +16,10 @@
   消耗与战斗效果（伤害/格挡/治疗/状态/能量，含死亡打断与胜负）在**同一个动作里原子结算**——成功才随
   事务落库，双击/超时重试走 request_id 幂等只生效一瓶；药水随交接快照跨章携带，续局、领奖、战败解锁与
   整程回放全部逐位一致（规则 2.5.0，旧档首次载入补空背包）
+- **伙伴模块**：旅途商店可花 50 金币招募一名见习卫士（一局/远征限一名），非战斗时可安排随行或休整；
+  随行伙伴每轮开始攻击敌人，并在敌人伤害穿透格挡时优先援护，生命归零即负伤并自动暂停参战，休整伙伴
+  可在休息节点治疗。招募扣款、战斗伤害、负伤、治疗均走普通动作与统一结算队列；伙伴随章节交接快照继承，
+  续局、整章/整程回放逐帧重建，2.6.0 之前旧档首次载入自动补 `companion:null` 并按 legacy 校验过渡
 - 构筑牌组、挑战精英/首领，奖励选择影响后续遭遇（遗物加伤、首领血量提升等）
 - 卡牌效果统一经 **结算队列** 处理，支持连锁触发、状态叠加、死亡打断
 - **战斗演出**：Phaser 场景按服务端结算顺序逐条播放（待机/攻击/受击/死亡动画、护盾与状态实时刷新），
@@ -92,12 +96,14 @@ request_id 幂等含并发同键、expected_rev 状态冲突 409、旧 schema �
 替换丢弃/贸易委托推进/失败零副作用、战利品药水入包与背满选格替换、五种药水战斗效果、
 消耗与击杀胜负同动作原子结算、非回合/战斗外/战败终态拒绝使用且不消耗、非战斗丢弃与
 战斗中禁丢、request_id 双击只生效一瓶、药水随交接快照跨章、购买/使用/替换逐位回放
-校验点全通过且最终帧与在线一致、旧档空背包迁移）**。
+校验点全通过且最终帧与在线一致、旧档空背包迁移）**、
+**伙伴（商店限招与扣款售罄、非战斗随行/休整、回合协助、援护承伤、负伤暂停、
+休息节点治疗、跨章交接、续局与新旧回放校验、旧档补字段迁移）**。
 
 ## API 摘要
 - `POST /api/runs {seed?}` 建局
 - `GET  /api/runs/{id}/resume` 续局
-- `POST /api/runs/{id}/act {action,...}` 行动（choose_node / play / end_turn / claim_reward / forge / shop_buy / shop_remove / use_potion / discard_potion / commission_accept / commission_claim）
+- `POST /api/runs/{id}/act {action,...}` 行动（choose_node / play / end_turn / claim_reward / forge / shop_buy / shop_remove / use_potion / discard_potion / companion_set_mode / commission_accept / commission_claim）
   - 可选并发字段：`request_id`（客户端为每个意图生成的令牌；同令牌重复/并发提交返回首次响应，
     响应里 `duplicate:true`，绝不重复执行）、`expected_rev`（所依据视口的存档版本号；
     存档已被推进则返回 409 状态冲突）。行动响应与 `/resume` 视口携带当前 `rev`。
@@ -159,6 +165,19 @@ request_id 幂等含并发同键、expected_rev 状态冲突 409、旧 schema �
 - 回放：`use_potion/discard_potion` 是普通动作（kind=battle/potion），消耗与效果
   逐位重建、校验点严格比对；`log[0]` 为 `{potion:{slot,id,name,icon}}` 消耗标记，
   其后是同序结算事件，前端 Phaser 先弹药水横幅再逐条播放。
+
+伙伴模块（`app/companions.py`，规则 2.6.0）：
+- 招募：进入商店时，尚无伙伴则在 `shop.companions[]` 确定性出现见习卫士；
+  `shop_buy {kind:"companion", sku:"companion:squire"}` 扣 50 金币并入队，重复招募 409。
+- 随行/休整：非战斗时 `{action:"companion_set_mode", mode:"accompany|rest"}`；
+  随行才会创建战斗实体并行动，休整不参战。重复设置同模式返回 409，战斗中 400。
+- 战斗：每轮开始先对敌人造成 4 点伤害；敌人攻击将穿透玩家格挡时，伙伴先承受最多 3 点，
+  剩余伤害才作用玩家。伙伴生命归零即负伤并自动转休整，暂停后续参战。
+- 治疗：休整中的伙伴进入休息节点时回满生命并清除负伤；治疗与玩家节点恢复在同一个
+  `choose_node` 动作内落库。随后玩家可重新安排随行。
+- 持久化/回放：伙伴在 run 状态 `companion` 并进入 `carry.companion`；战斗中生命写入
+  `battle.companion_state`，每个战斗动作同步。续局、整章/整程回放均逐帧重建。
+  2.6.0 之前旧档缺字段时首次载入补 `companion:null`，迁移步前的旧校验点按 legacy 跳过。
 
 远征委托（仅远征章节商店挂单，普通局不出委托）：
 - 挂单：进入商店时 `shop.commissions[]` 确定性生成（随商店种子/章号/已持有委托，

@@ -66,6 +66,7 @@ export default function ShopView({ view, onClose }) {
 
   // 交易记录里把 sku 解析成中文名称
   const itemName = (kind, sku) => {
+    if (kind === 'companion') return shop.companions?.find((it) => it.sku === sku)?.name || sku
     const bucket = kind === 'card' ? shop.cards : shop.relics
     return bucket.find((it) => it.sku === sku)?.name || sku
   }
@@ -111,6 +112,29 @@ export default function ShopView({ view, onClose }) {
               <span className="siname">📿 {it.name}</span>
               <span className="sidesc">{it.desc}</span>
               <span className="siprice">{it.sold ? '已售出' : `${it.price} 金币`}</span>
+            </button>
+          ))}
+        </div>
+
+        <h3 className="shopsection">伙伴</h3>
+        {(shop.companions || []).length === 0 && (
+          <p className="shopdesc">你已经有同行的伙伴了；一场旅途只能招募一名伙伴。</p>
+        )}
+        <div className="shoplist">
+          {(shop.companions || []).map((it) => (
+            <button
+              key={it.sku}
+              className={`shopitem companion ${it.sold ? 'sold' : ''}`}
+              onClick={() => !it.sold && buy('companion', it.sku)}
+              disabled={it.sold || busy || view.gold < it.price}
+              title={it.desc}
+            >
+              <span className="siname">
+                🛡️ {it.name}
+                <em className="sitype">攻击 {it.attack} · 援护 {it.guard} · 生命 {it.max_health}</em>
+              </span>
+              <span className="sidesc">{it.desc}</span>
+              <span className="siprice">{it.sold ? '已招募' : `${it.price} 金币`}</span>
             </button>
           ))}
         </div>
@@ -213,7 +237,7 @@ export default function ShopView({ view, onClose }) {
               {shop.tx.map((t, i) => (
                 <li key={i}>
                   {t.type === 'buy'
-                    ? `购入${t.kind === 'card' ? '卡牌' : '遗物'}「${itemName(t.kind, t.sku)}」，花费 ${t.price}`
+                    ? `购入${t.kind === 'card' ? '卡牌' : t.kind === 'companion' ? '伙伴' : '遗物'}「${itemName(t.kind, t.sku)}」，花费 ${t.price}`
                     : `移除卡牌实例（${cardMeta(t.card)?.name || t.card}），花费 ${t.price}，牌组 ${t.deck_size} 张`}
                   ｜余额 {t.gold_left}
                 </li>
